@@ -1872,7 +1872,17 @@ async function handleProcessClick() {
     addProgressLog('=== 开始批量处理 ===');
 
     // 5. 获取并发和重试设置等...
-    const concurrencyLevel = parseInt(settings.concurrencyLevel) || 1;
+    const configuredConcurrencyLevel = parseInt(settings.concurrencyLevel) || 1;
+    let selectedOcrEngine = '';
+    try {
+        selectedOcrEngine = window.ocrSettingsManager?.getCurrentConfig?.()?.engine
+            || localStorage.getItem('ocrEngine')
+            || '';
+    } catch (error) {
+        console.warn('[Processing] 无法读取 OCR 引擎设置，使用默认并发策略:', error);
+    }
+    const isMistralOcr = hasPdfFiles && selectedOcrEngine === 'mistral';
+    const concurrencyLevel = isMistralOcr ? 1 : configuredConcurrencyLevel;
     const translationConcurrencyLevel = parseInt(settings.translationConcurrencyLevel) || 2;
     const skipEnabled = settings.skipProcessedFiles;
     const maxTokensValue = parseInt(settings.maxTokensPerChunk) || 2000;
@@ -1907,6 +1917,10 @@ async function handleProcessClick() {
     translationSemaphore.queue = [];
 
     addProgressLog(`文件并发: ${concurrencyLevel}, 翻译并发: ${translationConcurrencyLevel}, 最大重试: ${MAX_RETRIES}, 跳过已处理: ${skipEnabled}`);
+    if (isMistralOcr && configuredConcurrencyLevel !== 1) {
+        addProgressLog('检测到 Mistral OCR：为避免免费层级 1 RPS 限制，文件并发已强制设为 1。');
+        showNotification('Mistral 免费层级限制为约 1 RPS，已自动将文件并发设为 1。', 'info');
+    }
     updateConcurrentProgress(0);
 
     let successCount = 0;

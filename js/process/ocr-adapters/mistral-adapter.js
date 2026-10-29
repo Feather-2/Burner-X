@@ -5,6 +5,45 @@
  * Mistral OCR 适配器
  * 基于现有的 processOcrResults 逻辑
  */
+const MISTRAL_MIN_REQUEST_INTERVAL_MS = 1000;
+const MISTRAL_MAX_RATE_LIMIT_RETRIES = 3;
+let mistralRequestChain = Promise.resolve();
+let mistralLastRequestAt = 0;
+
+function scheduleMistralRequest(request) {
+  const run = mistralRequestChain.then(async () => {
+    const waitMs = Math.max(
+      0,
+      MISTRAL_MIN_REQUEST_INTERVAL_MS - (Date.now() - mistralLastRequestAt)
+    );
+    if (waitMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, waitMs));
+    }
+    mistralLastRequestAt = Date.now();
+    return request();
+  });
+  mistralRequestChain = run.catch(() => {});
+  return run;
+}
+
+async function fetchMistralWithRateLimit(requestFactory, operation) {
+  for (let attempt = 0; attempt <= MISTRAL_MAX_RATE_LIMIT_RETRIES; attempt++) {
+    const response = await scheduleMistralRequest(requestFactory);
+    if (response.status !== 429 || attempt === MISTRAL_MAX_RATE_LIMIT_RETRIES) {
+      return response;
+    }
+
+    const retryAfter = Number(response.headers?.get('Retry-After'));
+    const backoffMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter * 1000
+      : 2000 * (attempt + 1);
+    console.warn(`[Mistral OCR] ${operation} 遇到 429，${backoffMs}ms 后重试 (${attempt + 1}/${MISTRAL_MAX_RATE_LIMIT_RETRIES})`);
+    await new Promise(resolve => setTimeout(resolve, backoffMs));
+  }
+
+  throw new Error(`[Mistral OCR] ${operation} 重试失败`);
+}
+
 class MistralOcrAdapter extends OcrAdapter {
   constructor(config) {
     super(config);
@@ -111,13 +150,13 @@ class MistralOcrAdapter extends OcrAdapter {
     formData.append('file', file);
     formData.append('purpose', 'ocr');
 
-    const response = await fetch(`${this.baseUrl}/v1/files`, {
+    const response = await fetchMistralWithRateLimit(() => fetch(`${this.baseUrl}/v1/files`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`
       },
       body: formData
-    });
+    }), '上传文件');
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => response.statusText);
@@ -139,12 +178,12 @@ class MistralOcrAdapter extends OcrAdapter {
    * @returns {Promise<string>} signed_url
    */
   async getMistralSignedUrl(fileId, apiKey) {
-    const response = await fetch(`${this.baseUrl}/v1/files/${fileId}/url`, {
+    const response = await fetchMistralWithRateLimit(() => fetch(`${this.baseUrl}/v1/files/${fileId}/url`, {
       method: 'GET',
       headers: {
         'Authorization': `Bearer ${apiKey}`
       }
-    });
+    }), '获取签名 URL');
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => response.statusText);
@@ -166,7 +205,7 @@ class MistralOcrAdapter extends OcrAdapter {
    * @returns {Promise<Object>} OCR 数据
    */
   async callOcrApi(signedUrl, apiKey) {
-    const response = await fetch(`${this.baseUrl}/v1/ocr`, {
+    const response = await fetchMistralWithRateLimit(() => fetch(`${this.baseUrl}/v1/ocr`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -178,7 +217,7 @@ class MistralOcrAdapter extends OcrAdapter {
         document: { type: 'document_url', document_url: signedUrl },
         include_image_base64: true
       })
-    });
+    }), 'OCR 处理');
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => response.statusText);
@@ -203,12 +242,12 @@ class MistralOcrAdapter extends OcrAdapter {
     if (!fileId || !apiKey) return;
 
     try {
-      const response = await fetch(`${this.baseUrl}/v1/files/${fileId}`, {
+      const response = await fetchMistralWithRateLimit(() => fetch(`${this.baseUrl}/v1/files/${fileId}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${apiKey}`
         }
-      });
+      }), '删除文件');
 
       if (!response.ok) {
         console.warn(`[Mistral OCR] 文件删除失败: ${response.status}`);
